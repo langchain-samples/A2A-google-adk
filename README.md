@@ -4,6 +4,35 @@
 
 This project demonstrates Agent-to-Agent (A2A) communication between different agent frameworks, enabling distributed tracing and conversation across multiple agent implementations.
 
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    test_agent_conversation.py                   │
+│                    (Orchestrates conversation)                  │
+└────────────┬──────────────────────────────┬────────────────────┘
+             │                              │
+             │ A2A Protocol                 │ A2A Protocol
+             │ (JSON-RPC)                   │ (JSON-RPC)
+             │                              │
+    ┌────────▼────────┐          ┌────────▼────────┐
+    │  LangChain Agent │          │  Google ADK     │
+    │  Port 2024       │          │  Agent          │
+    │  (langgraph dev) │          │  Port 8002      │
+    │                  │          │  (uvicorn)       │
+    └────────┬─────────┘          └────────┬────────┘
+             │                              │
+             │ OpenTelemetry                │ OpenTelemetry
+             │ Traces                       │ Traces
+             │                              │
+             └──────────────┬───────────────┘
+                            │
+                   ┌────────▼────────┐
+                   │   LangSmith     │
+                   │   (Tracing)     │
+                   └─────────────────┘
+```
+
 ## Project Structure
 
 ```
