@@ -11,6 +11,9 @@ from google.genai import types
 from google.adk.models.lite_llm import LiteLlm
 from dotenv import load_dotenv
 import os
+from fastapi import Request
+from opentelemetry import trace
+from opentelemetry.context import set_value, attach
 
 # Configure OpenTelemetry tracing to LangSmith
 from langsmith.integrations.otel import configure
@@ -91,3 +94,41 @@ root_agent = Agent(
 # Expose the agent via A2A protocol
 # This creates an A2A-compatible FastAPI app that can be served with uvicorn
 a2a_app = to_a2a(root_agent, port=8002)
+
+# Add middleware to extract session_id from metadata and set as thread_id in OpenTelemetry
+@a2a_app.middleware("http")
+async def set_thread_id_middleware(request: Request, call_next):
+    """Extract session_id from metadata and set as thread_id in OpenTelemetry spans."""
+    tracer = trace.get_tracer(__name__)
+    
+    thread_id = None
+    if request.method == "POST":
+        try:
+            body_bytes = await request.body()
+            if body_bytes:
+                import json
+                body = json.loads(body_bytes)
+                if "metadata" in body:
+                    thread_id = body["metadata"].get("thread_id")
+                async def receive():
+                    return {"type": "http.request", "body": body_bytes}
+                request._receive = receive
+        except:
+            pass
+    
+    if thread_id:
+        ctx = set_value("thread_id", thread_id)
+        token = attach(ctx)
+    else:
+        token = None
+    
+    try:
+        with tracer.start_as_current_span("google_adk_agent") as span:
+            if thread_id:
+                span.set_attribute("langsmith.metadata.thread_id", thread_id)
+            response = await call_next(request)
+            return response
+    finally:
+        if token:
+            from opentelemetry.context import detach
+            detach(token)

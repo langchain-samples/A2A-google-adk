@@ -24,13 +24,13 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 
-async def send_to_langchain(session, assistant_id, text, context_id=None, task_id=None):
+async def send_to_langchain(session, assistant_id, text, thread_id, context_id=None, task_id=None):
     """Send a message to LangChain agent using standard A2A format.
     
     Uses contextId per A2A spec (3.4.2) for multi-turn conversation patterns.
     contextId and taskId are included inside the message object (not at params level).
     First message doesn't include contextId (server generates it).
-    Adds session_id in metadata to group traces in LangSmith.
+    Uses thread_id (context_id) in metadata to group traces in LangSmith.
     """
     url = f"http://127.0.0.1:2024/a2a/{assistant_id}"
     
@@ -53,15 +53,14 @@ async def send_to_langchain(session, assistant_id, text, context_id=None, task_i
         "messageId": message["messageId"]
     }
     
-    # Use context_id for session tracking, or generate one if not provided
-    session_id = context_id if context_id else str(uuid.uuid4())
-    
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
         "method": "message/send",
         "params": params,
-        "metadata": {"session_id": session_id}  # Groups traces in LangSmith
+        "metadata": {
+            "thread_id": thread_id  # Use context_id as thread_id to group traces in same thread
+        }
     }
     
     headers = {"Accept": "application/json"}
@@ -89,14 +88,14 @@ async def send_to_langchain(session, assistant_id, text, context_id=None, task_i
         return False, f"Exception: {str(e)}", None, None
 
 
-async def send_to_google_adk(session, text, context_id=None, task_id=None):
+async def send_to_google_adk(session, text, thread_id, context_id=None, task_id=None):
     """Send a message to Google ADK agent using to_a2a() format.
     
     Google ADK to_a2a() expects:
     - messageId inside the message object
     - contextId and taskId also inside the message object (per A2A spec)
     - First message doesn't include contextId (server generates it)
-    - Adds session_id in metadata to group traces in LangSmith
+    - Uses thread_id (context_id) in metadata to group traces in LangSmith
     """
     url = "http://localhost:8002/"
     
@@ -117,15 +116,14 @@ async def send_to_google_adk(session, text, context_id=None, task_id=None):
         "message": message
     }
     
-    # Use context_id for session tracking, or generate one if not provided
-    session_id = context_id if context_id else str(uuid.uuid4())
-    
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
         "method": "message/send",
         "params": params,
-        "metadata": {"session_id": session_id}  # Groups traces in LangSmith
+        "metadata": {
+            "thread_id": thread_id  # Use context_id as thread_id to group traces in same thread
+        }
     }
     
     headers = {"Accept": "application/json"}
@@ -169,8 +167,9 @@ async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_me
     
     message = initial_message
     
-    langchain_context_id = None
-    adk_context_id = None
+    # Use context_id as thread_id - both agents share the same value
+    shared_thread_id = str(uuid.uuid4())
+    context_id = None
     langchain_task_id = None
     adk_task_id = None
     
@@ -178,20 +177,20 @@ async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_me
     async with aiohttp.ClientSession() as session:
         for i in range(num_rounds):
             print(f"--- Round {i + 1} ---")
-            if langchain_context_id:
-                print(f"📎 LangChain Context ID: {langchain_context_id}")
-            if adk_context_id:
-                print(f"📎 ADK Context ID: {adk_context_id}")
+            if context_id:
+                print(f"📎 Context ID: {context_id}")
             if langchain_task_id:
                 print(f"📋 LangChain Task ID: {langchain_task_id}")
             if adk_task_id:
                 print(f"📋 ADK Task ID: {adk_task_id}")
             print()
             
+            thread_id = context_id or shared_thread_id
+            
             # LangChain agent responds
             print(f"📤 Sending to LangChain: {message[:60]}...")
             success, response, new_task_id, new_context_id = await send_to_langchain(
-                session, langchain_assistant_id, message, langchain_context_id, None
+                session, langchain_assistant_id, message, thread_id, context_id, None
             )
             
             if success:
@@ -200,7 +199,8 @@ async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_me
                 if new_task_id:
                     langchain_task_id = new_task_id
                 if new_context_id:
-                    langchain_context_id = new_context_id
+                    context_id = new_context_id
+                    shared_thread_id = new_context_id
             else:
                 print(f"❌ LangChain Error: {response}")
                 break
@@ -208,9 +208,10 @@ async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_me
             print()
             
             # Google ADK agent responds
+            thread_id = context_id or shared_thread_id
             print(f"📤 Sending to Google ADK: {message[:60]}...")
             success, response, new_task_id, new_context_id = await send_to_google_adk(
-                session, message, adk_context_id, None
+                session, message, thread_id, context_id, None
             )
             
             if success:
@@ -219,7 +220,8 @@ async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_me
                 if new_task_id:
                     adk_task_id = new_task_id
                 if new_context_id:
-                    adk_context_id = new_context_id
+                    context_id = new_context_id
+                    shared_thread_id = new_context_id
             else:
                 print(f"❌ Google ADK Error: {response}")
                 break
@@ -254,7 +256,7 @@ def main():
         print("  export LANGCHAIN_ASSISTANT_ID=<assistant_id>")
         print()
         print("To get the assistant_id:")
-        print("  1. Start LangChain agent: cd langchain_agent && langgraph dev --port 2026")
+        print("  1. Start LangChain agent: cd langchain_agent && langgraph dev --port 2024")
         print("  2. Copy the assistant_id from the output")
         sys.exit(1)
     

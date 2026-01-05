@@ -1,5 +1,7 @@
 # A2A Distributed Tracing Project
 
+![Thread View in LangSmith](assets/thread_view.png)
+
 This project demonstrates Agent-to-Agent (A2A) communication between different agent frameworks, enabling distributed tracing and conversation across multiple agent implementations.
 
 ## Project Structure
@@ -115,10 +117,10 @@ uv run python test_agent_conversation.py
 ```
 
 The script will:
-- Create consistent thread IDs for each agent
-- Add `session_id` in metadata to group traces in LangSmith
+- Use `context_id` as `thread_id` to group traces in LangSmith
+- Share the same `thread_id` between both agents for unified tracing
 - Simulate a conversation between LangChain and Google ADK agents
-- Maintain conversation context across multiple rounds
+- Maintain conversation context across multiple rounds using A2A `contextId`
 
 ## Agent Details
 
@@ -161,18 +163,18 @@ The project follows the [A2A Protocol Specification](https://a2a-protocol.org/la
 
 - **Endpoint**: `http://localhost:{port}/a2a/{assistant_id}`
 - **Format**: Standard A2A protocol
-- **Context ID**: Used in `params.contextId` for multi-turn conversation continuity
-- **Task ID**: Optionally included in `params.taskId` for follow-up messages referencing specific tasks
-- **Metadata**: `session_id` added at payload root level for LangSmith tracing
+- **Context ID**: Used inside `message.contextId` for multi-turn conversation continuity
+- **Task ID**: Optionally included in `message.taskId` for follow-up messages referencing specific tasks
+- **Metadata**: `thread_id` (using `context_id` value) added at payload root level for LangSmith tracing
 
 ### Google ADK Agent (to_a2a format)
 
 - **Endpoint**: `http://localhost:8002/` (root endpoint)
 - **Format**: `to_a2a()` specific format
-- **Context ID**: Used in `params.contextId` for multi-turn conversation continuity
-- **Task ID**: Optionally included in `params.taskId` for follow-up messages
+- **Context ID**: Used inside `message.contextId` for multi-turn conversation continuity
+- **Task ID**: Optionally included in `message.taskId` for follow-up messages
 - **Message ID**: Inside `message` object (not at params level)
-- **Metadata**: `session_id` added at payload root level for LangSmith tracing
+- **Metadata**: `thread_id` (using `context_id` value) added at payload root level for LangSmith tracing
 
 ### Multi-Turn Conversation Pattern
 
@@ -184,14 +186,17 @@ According to A2A spec 3.4.2:
 
 ## Distributed Tracing
 
-The project uses multiple tracing mechanisms to track agent interactions:
+The project uses distributed tracing to track agent interactions across multiple agents, ensuring all traces are grouped in the same thread in LangSmith.
 
-### Session ID Metadata
+### Thread ID Metadata
 
-All agents use `session_id` in metadata to group traces in LangSmith:
+All agents use `thread_id` in metadata (using `context_id` value) to group traces in LangSmith. Both agents share the same `thread_id` to ensure unified tracing:
 
 ```python
 # First message (no contextId - server generates it)
+# Use a shared thread_id for both agents
+thread_id = str(uuid.uuid4())
+
 payload = {
     "jsonrpc": "2.0",
     "id": str(uuid.uuid4()),
@@ -204,10 +209,13 @@ payload = {
         },
         "messageId": str(uuid.uuid4())
     },
-    "metadata": {"session_id": session_id}  # Groups traces in LangSmith
+    "metadata": {"thread_id": thread_id}  # Groups traces in LangSmith
 }
 
-# Follow-up message (includes contextId and optionally taskId inside message object)
+# Follow-up message (includes contextId inside message object)
+# Use context_id as thread_id once available
+thread_id = context_id  # From previous response
+
 payload = {
     "jsonrpc": "2.0",
     "id": str(uuid.uuid4()),
@@ -217,23 +225,28 @@ payload = {
             "role": "user",
             "parts": [{"kind": "text", "text": "Follow-up"}],
             "messageId": str(uuid.uuid4()),
-            "contextId": context_id,  # From previous response
-            "taskId": task_id  # Optional, from previous response
+            "contextId": context_id  # From previous response
         },
         "messageId": str(uuid.uuid4())
     },
-    "metadata": {"session_id": session_id}  # Groups traces in LangSmith
+    "metadata": {"thread_id": thread_id}  # Use context_id as thread_id
 }
 ```
+
+**Key Points:**
+- `context_id` from A2A responses is used as `thread_id` in metadata
+- Both agents share the same `thread_id` value to ensure traces are grouped together
+- The `thread_id` is synchronized between agents when either receives a new `context_id`
 
 ### OpenTelemetry Tracing (Google ADK)
 
 The Google ADK agent includes OpenTelemetry instrumentation that automatically sends traces to LangSmith:
 
 - **Basic tracing**: Uses `langsmith.integrations.otel.configure()` for automatic tracing
-- **Optional instrumentation**: Attempts to use `GoogleADKInstrumentor` if available (requires `openinference` package)
+- **Thread ID extraction**: Middleware extracts `thread_id` from request metadata and sets it as `langsmith.metadata.thread_id` in span attributes
 - **Unified project**: All traces go to the same LangSmith project (`a2a-distributed-tracing` by default)
 - **Complete visibility**: Captures agent conversations, tool calls, and model interactions
+- **Thread grouping**: Uses `langsmith.metadata.thread_id` attribute to group traces in the same thread
 
 To enable tracing, set the `LANGSMITH_API_KEY` environment variable. The project name can be customized via `LANGSMITH_PROJECT` (defaults to `a2a-distributed-tracing`).
 
@@ -243,10 +256,11 @@ To enable tracing, set the `LANGSMITH_API_KEY` environment variable. The project
 
 This tracing setup allows you to:
 - Track complete conversations across multiple agents
-- Group related traces by session
+- Group related traces by thread_id (using context_id) in LangSmith
+- View all agent interactions in the same thread for unified analysis
 - Analyze agent-to-agent communication patterns
 - Debug distributed agent interactions
-- View detailed OpenTelemetry spans for Google ADK operations
+- View detailed OpenTelemetry spans for Google ADK operations with thread_id in metadata
 
 ## Development
 
