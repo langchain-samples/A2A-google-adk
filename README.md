@@ -155,20 +155,32 @@ The script will:
 
 ## A2A Protocol Details
 
+The project follows the [A2A Protocol Specification](https://a2a-protocol.org/latest/specification/) for multi-turn conversations, specifically using `contextId` per section 3.4.2 (Multi-Turn Conversation Patterns).
+
 ### LangGraph/LangChain Agents (Standard A2A)
 
 - **Endpoint**: `http://localhost:{port}/a2a/{assistant_id}`
 - **Format**: Standard A2A protocol
-- **Thread ID**: Used in `thread.threadId` parameter
+- **Context ID**: Used in `params.contextId` for multi-turn conversation continuity
+- **Task ID**: Optionally included in `params.taskId` for follow-up messages referencing specific tasks
 - **Metadata**: `session_id` added at payload root level for LangSmith tracing
 
 ### Google ADK Agent (to_a2a format)
 
 - **Endpoint**: `http://localhost:8002/` (root endpoint)
 - **Format**: `to_a2a()` specific format
-- **Thread ID**: Used in `thread.threadId` parameter
+- **Context ID**: Used in `params.contextId` for multi-turn conversation continuity
+- **Task ID**: Optionally included in `params.taskId` for follow-up messages
 - **Message ID**: Inside `message` object (not at params level)
 - **Metadata**: `session_id` added at payload root level for LangSmith tracing
+
+### Multi-Turn Conversation Pattern
+
+According to A2A spec 3.4.2:
+- **Context Continuity**: Task objects maintain conversation context through the `contextId` field
+- **Follow-up Messages**: Clients can include `contextId` in subsequent messages to continue a previous interaction
+- **Task References**: Clients can use `taskId` (with or without `contextId`) to continue or refine a specific task
+- **Context Inheritance**: New tasks created within the same `contextId` can inherit context from previous interactions
 
 ## Distributed Tracing
 
@@ -179,12 +191,38 @@ The project uses multiple tracing mechanisms to track agent interactions:
 All agents use `session_id` in metadata to group traces in LangSmith:
 
 ```python
+# First message (no contextId - server generates it)
 payload = {
     "jsonrpc": "2.0",
     "id": str(uuid.uuid4()),
     "method": "message/send",
-    "params": {...},
-    "metadata": {"session_id": thread_id}  # Groups traces in LangSmith
+    "params": {
+        "message": {
+            "role": "user",
+            "parts": [{"kind": "text", "text": "Hello"}],
+            "messageId": str(uuid.uuid4())
+        },
+        "messageId": str(uuid.uuid4())
+    },
+    "metadata": {"session_id": session_id}  # Groups traces in LangSmith
+}
+
+# Follow-up message (includes contextId and optionally taskId inside message object)
+payload = {
+    "jsonrpc": "2.0",
+    "id": str(uuid.uuid4()),
+    "method": "message/send",
+    "params": {
+        "message": {
+            "role": "user",
+            "parts": [{"kind": "text", "text": "Follow-up"}],
+            "messageId": str(uuid.uuid4()),
+            "contextId": context_id,  # From previous response
+            "taskId": task_id  # Optional, from previous response
+        },
+        "messageId": str(uuid.uuid4())
+    },
+    "metadata": {"session_id": session_id}  # Groups traces in LangSmith
 }
 ```
 

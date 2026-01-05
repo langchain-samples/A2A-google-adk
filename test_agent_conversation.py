@@ -2,11 +2,14 @@
 """Test script to simulate a conversation between LangChain and Google ADK agents.
 
 This script demonstrates A2A communication between:
-- LangChain agent (port 2026) - uses standard A2A format
+- LangChain agent (port 2024) - uses standard A2A format
 - Google ADK agent (port 8002) - uses to_a2a() format
 
+Uses contextId per A2A specification 3.4.2 for multi-turn conversation patterns.
+Tracks taskId for follow-up messages referencing specific tasks.
+
 Prerequisites:
-1. Start LangChain agent: cd langchain_agent && langgraph dev --port 2026
+1. Start LangChain agent: cd langchain_agent && langgraph dev --port 2024
    (Copy the assistant_id from the output)
 2. Start Google ADK agent: uvicorn google_adk.agent:a2a_app --host localhost --port 8002
 """
@@ -21,26 +24,44 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 
-async def send_to_langchain(session, assistant_id, text, thread_id):
+async def send_to_langchain(session, assistant_id, text, context_id=None, task_id=None):
     """Send a message to LangChain agent using standard A2A format.
     
-    Uses consistent thread_id to maintain conversation context and adds
-    session_id in metadata to group traces in LangSmith.
+    Uses contextId per A2A spec (3.4.2) for multi-turn conversation patterns.
+    contextId and taskId are included inside the message object (not at params level).
+    First message doesn't include contextId (server generates it).
+    Adds session_id in metadata to group traces in LangSmith.
     """
     url = f"http://127.0.0.1:2024/a2a/{assistant_id}"
+    
+    # Build message object - contextId and taskId go inside the message
+    message = {
+        "role": "user",
+        "parts": [{"kind": "text", "text": text}],
+        "messageId": str(uuid.uuid4())
+    }
+    
+    # Add contextId and taskId inside message for follow-up messages
+    if context_id:
+        message["contextId"] = context_id
+    if task_id:
+        message["taskId"] = task_id
+    
+    # Build params - messageId is also at params level for some implementations
+    params = {
+        "message": message,
+        "messageId": message["messageId"]
+    }
+    
+    # Use context_id for session tracking, or generate one if not provided
+    session_id = context_id if context_id else str(uuid.uuid4())
+    
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
         "method": "message/send",
-        "params": {
-            "message": {
-                "role": "user",
-                "parts": [{"kind": "text", "text": text}]
-            },
-            "messageId": str(uuid.uuid4()),
-            "thread": {"threadId": thread_id}
-        },
-        "metadata": {"session_id": thread_id}  # Groups traces in LangSmith
+        "params": params,
+        "metadata": {"session_id": session_id}  # Groups traces in LangSmith
     }
     
     headers = {"Accept": "application/json"}
@@ -48,36 +69,63 @@ async def send_to_langchain(session, assistant_id, text, thread_id):
         async with session.post(url, json=payload, headers=headers) as response:
             if response.status == 200:
                 result = await response.json()
-                return True, result["result"]["artifacts"][0]["parts"][0]["text"]
+                
+                if "error" in result:
+                    return False, result["error"].get("message", "Unknown error"), None, None
+                
+                if "result" not in result:
+                    return False, "Response missing 'result' key", None, None
+                
+                result_obj = result["result"]
+                task_id = result_obj.get("id")
+                context_id = result_obj.get("contextId")
+                response_text = result_obj["artifacts"][0]["parts"][0]["text"]
+                
+                return True, response_text, task_id, context_id
             else:
                 text = await response.text()
-                return False, f"Error {response.status}: {text[:200]}"
+                return False, f"Error {response.status}: {text[:200]}", None, None
     except Exception as e:
-        return False, f"Exception: {str(e)}"
+        return False, f"Exception: {str(e)}", None, None
 
 
-async def send_to_google_adk(session, text, thread_id):
+async def send_to_google_adk(session, text, context_id=None, task_id=None):
     """Send a message to Google ADK agent using to_a2a() format.
     
     Google ADK to_a2a() expects:
-    - messageId inside the message object (not at params level)
-    - Uses consistent thread_id to maintain conversation context
+    - messageId inside the message object
+    - contextId and taskId also inside the message object (per A2A spec)
+    - First message doesn't include contextId (server generates it)
     - Adds session_id in metadata to group traces in LangSmith
     """
     url = "http://localhost:8002/"
+    
+    # Build message object - contextId and taskId go inside the message
+    message = {
+        "role": "user",
+        "parts": [{"kind": "text", "text": text}],
+        "messageId": str(uuid.uuid4())
+    }
+    
+    # Add contextId and taskId inside message for follow-up messages
+    if context_id:
+        message["contextId"] = context_id
+    if task_id:
+        message["taskId"] = task_id
+    
+    params = {
+        "message": message
+    }
+    
+    # Use context_id for session tracking, or generate one if not provided
+    session_id = context_id if context_id else str(uuid.uuid4())
+    
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
         "method": "message/send",
-        "params": {
-            "message": {
-                "role": "user",
-                "parts": [{"kind": "text", "text": text}],
-                "messageId": str(uuid.uuid4())
-            },
-            "thread": {"threadId": thread_id}
-        },
-        "metadata": {"session_id": thread_id}  # Groups traces in LangSmith
+        "params": params,
+        "metadata": {"session_id": session_id}  # Groups traces in LangSmith
     }
     
     headers = {"Accept": "application/json"}
@@ -85,12 +133,24 @@ async def send_to_google_adk(session, text, thread_id):
         async with session.post(url, json=payload, headers=headers) as response:
             if response.status == 200:
                 result = await response.json()
-                return True, result["result"]["artifacts"][0]["parts"][0]["text"]
+                
+                if "error" in result:
+                    return False, result["error"].get("message", "Unknown error"), None, None
+                
+                if "result" not in result:
+                    return False, "Response missing 'result' key", None, None
+                
+                result_obj = result["result"]
+                task_id = result_obj.get("id")
+                context_id = result_obj.get("contextId")
+                response_text = result_obj["artifacts"][0]["parts"][0]["text"]
+                
+                return True, response_text, task_id, context_id
             else:
                 text = await response.text()
-                return False, f"Error {response.status}: {text[:200]}"
+                return False, f"Error {response.status}: {text[:200]}", None, None
     except Exception as e:
-        return False, f"Exception: {str(e)}"
+        return False, f"Exception: {str(e)}", None, None
 
 
 async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_message=None):
@@ -109,29 +169,38 @@ async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_me
     
     message = initial_message
     
-    # Generate consistent thread IDs (used as session_id in metadata for LangSmith)
-    langchain_thread_id = str(uuid.uuid4())
-    adk_thread_id = str(uuid.uuid4())
+    langchain_context_id = None
+    adk_context_id = None
+    langchain_task_id = None
+    adk_task_id = None
     
-    print(f"📎 Session IDs - LangChain: {langchain_thread_id}, ADK: {adk_thread_id}")
-    print("(These will be used as session_id in metadata to group traces in LangSmith)")
-    print()
     
     async with aiohttp.ClientSession() as session:
         for i in range(num_rounds):
             print(f"--- Round {i + 1} ---")
-            print(f"📎 Thread IDs - LangChain: {langchain_thread_id}, ADK: {adk_thread_id}")
+            if langchain_context_id:
+                print(f"📎 LangChain Context ID: {langchain_context_id}")
+            if adk_context_id:
+                print(f"📎 ADK Context ID: {adk_context_id}")
+            if langchain_task_id:
+                print(f"📋 LangChain Task ID: {langchain_task_id}")
+            if adk_task_id:
+                print(f"📋 ADK Task ID: {adk_task_id}")
             print()
             
             # LangChain agent responds
             print(f"📤 Sending to LangChain: {message[:60]}...")
-            success, response = await send_to_langchain(
-                session, langchain_assistant_id, message, langchain_thread_id
+            success, response, new_task_id, new_context_id = await send_to_langchain(
+                session, langchain_assistant_id, message, langchain_context_id, None
             )
             
             if success:
                 print(f"🟡 LangChain Agent: {response}")
                 message = response
+                if new_task_id:
+                    langchain_task_id = new_task_id
+                if new_context_id:
+                    langchain_context_id = new_context_id
             else:
                 print(f"❌ LangChain Error: {response}")
                 break
@@ -140,13 +209,17 @@ async def simulate_conversation(langchain_assistant_id, num_rounds=5, initial_me
             
             # Google ADK agent responds
             print(f"📤 Sending to Google ADK: {message[:60]}...")
-            success, response = await send_to_google_adk(
-                session, message, adk_thread_id
+            success, response, new_task_id, new_context_id = await send_to_google_adk(
+                session, message, adk_context_id, None
             )
             
             if success:
                 print(f"🟢 Google ADK Agent: {response}")
                 message = response
+                if new_task_id:
+                    adk_task_id = new_task_id
+                if new_context_id:
+                    adk_context_id = new_context_id
             else:
                 print(f"❌ Google ADK Error: {response}")
                 break
