@@ -1,4 +1,4 @@
-# A2A Distributed Tracing Project
+# A2A LangChain <> Google ADK Interaction
 
 ![Thread View in LangSmith](assets/thread_view.png)
 
